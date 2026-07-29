@@ -74,29 +74,26 @@ describe('transport binding', () => {
 });
 
 describe('header validation matrix (-32020 / -32022 / -32602)', () => {
-  it('missing MCP-Protocol-Version header → 400 HeaderMismatch', async () => {
-    const res = await run(mcpRequest({ method: 'server/discover', headers: { 'MCP-Protocol-Version': null } }));
-    expect(res.status).toBe(400);
-    expect(rpcError(await bodyOf(res)).code).toBe(-32020);
-  });
-
-  it('header/body protocol version mismatch → 400 HeaderMismatch', async () => {
-    const res = await run(mcpRequest({ method: 'server/discover', headers: { 'MCP-Protocol-Version': '2025-11-25' } }));
-    expect(res.status).toBe(400);
-    expect(rpcError(await bodyOf(res)).code).toBe(-32020);
-  });
-
-  it('consistent but unsupported version → 400 UnsupportedProtocolVersion with supported list', async () => {
+  it('modern header with mismatching body version → 400 HeaderMismatch', async () => {
     const res = await run(mcpRequest({
       method: 'server/discover',
-      headers: { 'MCP-Protocol-Version': '2025-11-25' },
       meta: { 'io.modelcontextprotocol/protocolVersion': '2025-11-25' },
+    }));
+    expect(res.status).toBe(400);
+    expect(rpcError(await bodyOf(res)).code).toBe(-32020);
+  });
+
+  it('consistent but unsupported FUTURE version → 400 UnsupportedProtocolVersion with supported list', async () => {
+    const res = await run(mcpRequest({
+      method: 'server/discover',
+      headers: { 'MCP-Protocol-Version': '2027-01-01' },
+      meta: { 'io.modelcontextprotocol/protocolVersion': '2027-01-01' },
     }));
     expect(res.status).toBe(400);
     const err = rpcError(await bodyOf(res));
     expect(err.code).toBe(-32022);
     expect((err.data as { supported: string[] }).supported).toEqual(['2026-07-28']);
-    expect((err.data as { requested: string }).requested).toBe('2025-11-25');
+    expect((err.data as { requested: string }).requested).toBe('2027-01-01');
   });
 
   it('missing Mcp-Method header → -32020; mismatching → -32020', async () => {
@@ -126,6 +123,89 @@ describe('header validation matrix (-32020 / -32022 / -32602)', () => {
     const res = await run(mcpRequest({ method: 'server/discover', meta: null }));
     expect(res.status).toBe(400);
     expect(rpcError(await bodyOf(res)).code).toBe(-32602);
+  });
+});
+
+describe('legacy era leg (2025-11-25 initialize-handshake clients)', () => {
+  const legacyPost = (method: string, params: Record<string, unknown>, extra: Record<string, string> = {}) =>
+    new Request('https://mcp.worldku.com/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${TEST_KEY}`,
+        ...extra,
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 7, method, params }),
+    });
+
+  it('initialize negotiates 2025-11-25, stateless (no Mcp-Session-Id header)', async () => {
+    const res = await run(legacyPost('initialize', {
+      protocolVersion: '2025-11-25',
+      capabilities: { roots: { listChanged: true } },
+      clientInfo: { name: 'claude-code', version: '2.1.217' },
+    }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Mcp-Session-Id')).toBeNull();
+    const result = (await bodyOf(res))['result'] as Record<string, unknown>;
+    expect(result['protocolVersion']).toBe('2025-11-25');
+    expect((result['capabilities'] as Record<string, unknown>)['tools']).toBeDefined();
+    expect((result['serverInfo'] as Record<string, unknown>)['name']).toBe('worldku-mcp');
+  });
+
+  it('initialize with an unknown requested version negotiates our default', async () => {
+    const res = await run(legacyPost('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'old', version: '0' } }));
+    const result = (await bodyOf(res))['result'] as Record<string, unknown>;
+    expect(result['protocolVersion']).toBe('2025-11-25');
+  });
+
+  it('legacy auth is still enforced (401 without a credential)', async () => {
+    const res = await run(new Request('https://mcp.worldku.com/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'x', version: '0' } } }),
+    }));
+    expect(res.status).toBe(401);
+    expect(res.headers.get('WWW-Authenticate')).toContain('resource_metadata');
+  });
+
+  it('ping answers with an empty result', async () => {
+    const res = await run(legacyPost('ping', {}, { 'MCP-Protocol-Version': '2025-11-25' }));
+    const body = await bodyOf(res);
+    expect(body['result']).toEqual({});
+  });
+
+  it('tools/list works without per-request _meta', async () => {
+    const res = await run(legacyPost('tools/list', {}, { 'MCP-Protocol-Version': '2025-11-25' }));
+    const result = (await bodyOf(res))['result'] as { tools: Array<{ name: string }> };
+    expect(result.tools.map((t) => t.name)).toEqual(['memory_overview', 'memory_search', 'memory_recall', 'memory_save']);
+  });
+
+  it('tools/call runs and attributes the source from the User-Agent product token', async () => {
+    const res = await run(legacyPost('tools/call', {
+      name: 'memory_save',
+      arguments: { messages: [{ role: 'user', content: 'legacy save' }] },
+    }, { 'MCP-Protocol-Version': '2025-11-25', 'User-Agent': 'claude-code/2.1.217 (claude-desktop)' }));
+    expect(res.status).toBe(200);
+    const result = (await bodyOf(res))['result'] as Record<string, unknown>;
+    expect(result['resultType']).toBe('complete'); // legacy clients never get tasks
+    const save = db.calls.find((c) => c.path.includes('memory_mcp_save_conversation'))!.body as Record<string, unknown>;
+    expect(save['p_source_key']).toBe('claude_code');
+    expect(db.insertedTasks).toHaveLength(0);
+  });
+
+  it('notifications/initialized → 202', async () => {
+    const res = await run(new Request('https://mcp.worldku.com/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TEST_KEY}` },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+    }));
+    expect(res.status).toBe(202);
+  });
+
+  it('unknown legacy method → 404 -32601', async () => {
+    const res = await run(legacyPost('resources/list', {}, { 'MCP-Protocol-Version': '2025-11-25' }));
+    expect(res.status).toBe(404);
+    expect(rpcError(await bodyOf(res)).code).toBe(-32601);
   });
 });
 

@@ -77,9 +77,13 @@ More examples in [`examples/`](examples/).
 
 ## Protocol
 
-- MCP revision **2026-07-28** (stateless Streamable HTTP). No legacy
-  `initialize` handshake, no sessions, no SSE streams — every response is a
-  single JSON object.
+- Native MCP revision **2026-07-28** (stateless Streamable HTTP): per-request
+  metadata, no sessions, no SSE streams — every response is a single JSON
+  object.
+- Dual-era: the **2025-11-25** initialize-handshake era is also served (still
+  statelessly — no session ids, no SSE), because that is what current-generation
+  clients speak. This leg will be dropped once the client ecosystem moves to
+  2026-07-28.
 - `server/discover`, `tools/list`, `tools/call`, and the
   [Tasks extension](https://modelcontextprotocol.io/extensions/tasks/overview)
   (`tasks/get` / `tasks/update` / `tasks/cancel`) for async save polling.
