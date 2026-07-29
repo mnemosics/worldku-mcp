@@ -1,0 +1,49 @@
+# worldku-mcp — Worldku memory MCP server (Streamable HTTP, MCP rev 2026-07-28).
+# Public endpoint: https://mcp.worldku.com/mcp (custom domain, configured in the
+# Cloudflare dashboard or via `routes` below). Zero secrets in this file.
+name = "worldku-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-05-26"
+
+workers_dev = false
+preview_urls = false
+
+routes = [
+  { pattern = "mcp.worldku.com", custom_domain = true }
+]
+
+[observability.logs]
+enabled = true
+
+# Query embeddings for memory_search go worker->worker through a service binding
+# (same-account workers.dev subrequests are blocked by Cloudflare error 1042).
+[[services]]
+binding = "GATEWAY"
+service = "soul-ai-gateway"
+
+[vars]
+# Gateway CALL identity (app-key single-leg auth; the key itself is a secret).
+MCP_APP_ID = "app_worldku_mcp"
+MCP_SCENE_ID = "scene_platform_mcp"
+# Usage actions are registered under the Hub app axis (memory.mcp.read / memory.mcp.save).
+BILLING_APP_ID = "app_worldku"
+# RFC 8707 canonical resource URI — OAuth access tokens must carry exactly this audience.
+RESOURCE_URI = "https://mcp.worldku.com/mcp"
+# OAuth authorization server (the Worldku Hub) — advertised via RFC 9728 PRM.
+AUTH_SERVER_URL = "https://www.worldku.com"
+# Browser origins allowed to call the endpoint (DNS-rebinding guard doubles as CORS
+# allowlist). Requests without an Origin header (CLI clients) always pass.
+ALLOWED_ORIGINS = "https://claude.ai,https://claude.com,https://www.claude.com"
+# Daily sanity caps (anti-abuse, not commercial quota) + payload byte cap.
+READ_CAP = "200"
+WRITE_CAP = "50"
+PAYLOAD_MAX_BYTES = "10485760"
+# memory_overview page size.
+OVERVIEW_N = "20"
+# Task handle TTL (extraction completes in minutes; 24h is generous).
+TASK_TTL_MS = "86400000"
+# Must match the import worker's EXTRACTOR_VERSION (segment-job idempotency keys).
+EXTRACTOR_VERSION = "mem-3type@1"
+
+# secrets (set via `wrangler secret put`, NOT in this file):
+#   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, MCP_APP_KEY
