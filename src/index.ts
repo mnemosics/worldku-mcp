@@ -48,6 +48,7 @@ import {
   sourceIdentityOf,
 } from './tools/save';
 import { getTask } from './tasks';
+import { SERVER_CARD_PATH, AI_CATALOG_PATH, serverCardResponse, aiCatalogResponse } from './server-card';
 
 const SERVER_INFO_META = {
   'io.modelcontextprotocol/serverInfo': { name: SERVER_NAME, version: SERVER_VERSION },
@@ -347,6 +348,14 @@ const worker = {
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': '*' } });
       if (request.method !== 'GET') return new Response(null, { status: 405, headers: { Allow: 'GET' } });
       return prmResponse(env);
+    }
+
+    // Server Card discovery (SEP-2127 experimental extension): the card at the
+    // extension's reserved location + the domain-level AI Catalog entry point.
+    if (url.pathname === SERVER_CARD_PATH || url.pathname === AI_CATALOG_PATH) {
+      if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': '*' } });
+      if (request.method !== 'GET') return new Response(null, { status: 405, headers: { Allow: 'GET' } });
+      return url.pathname === SERVER_CARD_PATH ? serverCardResponse(env) : aiCatalogResponse(env);
     }
 
     if (url.pathname !== '/mcp') {
