@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.worldku/memory",
+  "title": "Worldku Memory",
+  "description": "Save AI conversations into your Worldku memory and recall them from any MCP client.",
+  "repository": {
+    "url": "https://github.com/mnemosics/worldku-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "websiteUrl": "https://www.worldku.com/en/docs/mcp",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.worldku.com/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Worldku MCP access key as a Bearer token (create at worldku.com under Memory manager - AI tools). OAuth-capable clients can omit this and use the advertised OAuth 2.1 authorization server instead.",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
