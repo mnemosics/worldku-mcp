@@ -2,7 +2,19 @@
 
 The official MCP server for [Worldku](https://www.worldku.com) memory. Save AI
 conversations into your Worldku memory and recall them back — from Claude Code,
-Codex, Gemini CLI, claude.ai, or any other MCP client.
+claude.ai, ChatGPT, Codex, Gemini CLI, or any other MCP client.
+
+**Full setup guide: [worldku.com/docs/mcp](https://www.worldku.com/en/docs/mcp)** —
+step-by-step instructions for every client, authentication details, and
+troubleshooting. The same page in raw Markdown for AI agents:
+[worldku.com/docs/mcp.md](https://www.worldku.com/docs/mcp.md).
+
+The fastest way to set up: paste this into your AI tool and let it walk you
+through —
+
+> I want to give you long-term memory with Worldku. Read
+> https://www.worldku.com/docs/mcp.md and walk me through connecting it, in
+> your own words.
 
 **Hosted service.** The public endpoint is `https://mcp.worldku.com/mcp`. This
 repository is the open access layer only: the memory extraction pipeline, prompt
@@ -28,29 +40,47 @@ previously saved conversation appends only the new tail.
 
 ## Connecting
 
-Authentication is a Worldku MCP access key (`wk_mcp_…`), minted in the Worldku
-console (Settings → MCP access). The key is shown once at mint time.
+Two authentication routes:
+
+- **OAuth 2.1** — claude.ai and ChatGPT need no key at all: point them at the
+  server URL and sign in at worldku.com when prompted.
+- **Access key** — CLI clients use a `wk_mcp_…` key, minted at
+  [worldku.com → Memory manager → AI tools](https://www.worldku.com/en/memorymanage?tab=connect).
+  The key is shown once at mint time; up to 20 keys per account, each
+  independently revocable.
 
 ### Claude Code
 
 ```bash
-claude mcp add --transport http worldku https://mcp.worldku.com/mcp \
+claude mcp add --transport http --scope user worldku https://mcp.worldku.com/mcp \
   --header "Authorization: Bearer wk_mcp_YOUR_KEY"
 ```
 
+To keep the key out of the config file, export `WORLDKU_MCP_KEY` in your shell
+profile and use single quotes: `--header 'Authorization: Bearer ${WORLDKU_MCP_KEY}'`.
+
+### claude.ai (web, desktop, mobile)
+
+Settings → Connectors → Add → **Add custom connector** →
+`https://mcp.worldku.com/mcp` → sign in at worldku.com. No key needed.
+
+### ChatGPT (web)
+
+Enable **Developer mode** (Settings → Security and login), then create an app
+at [chatgpt.com/plugins](https://chatgpt.com/plugins) with the server URL and
+OAuth authentication. Sign in at worldku.com when prompted.
+
 ### Codex CLI
 
-```toml
-# ~/.codex/config.toml
-[mcp_servers.worldku]
-url = "https://mcp.worldku.com/mcp"
-http_headers = { "Authorization" = "Bearer wk_mcp_YOUR_KEY" }
+```bash
+export WORLDKU_MCP_KEY=wk_mcp_YOUR_KEY
+codex mcp add worldku --url https://mcp.worldku.com/mcp --bearer-token-env-var WORLDKU_MCP_KEY
 ```
 
 ### Gemini CLI
 
 ```json
-// ~/.gemini/settings.json
+// ~/.gemini/settings.json — note the httpUrl field name
 {
   "mcpServers": {
     "worldku": {
@@ -61,11 +91,6 @@ http_headers = { "Authorization" = "Bearer wk_mcp_YOUR_KEY" }
 }
 ```
 
-### claude.ai (web)
-
-Add `https://mcp.worldku.com/mcp` as a custom connector. Authentication runs
-through Worldku's OAuth flow — no key needed.
-
 ### Any other MCP client
 
 Any client that supports Streamable HTTP with a custom header works:
@@ -73,7 +98,10 @@ Any client that supports Streamable HTTP with a custom header works:
 - URL: `https://mcp.worldku.com/mcp`
 - Header: `Authorization: Bearer wk_mcp_YOUR_KEY`
 
-More examples in [`examples/`](examples/).
+The config field holding the URL varies by client (`url` for most, `httpUrl`
+for Gemini CLI, `serverUrl` for some others) — a wrong field name usually makes
+the client ignore the server silently. More examples in [`examples/`](examples/)
+and in the [full guide](https://www.worldku.com/en/docs/mcp).
 
 ## Protocol
 
@@ -90,14 +118,18 @@ More examples in [`examples/`](examples/).
   Clients that do not declare the extension get synchronous receipts instead.
 - OAuth 2.1 resource server per the MCP authorization spec: RFC 9728 protected
   resource metadata at `/.well-known/oauth-protected-resource`, audience-bound
-  opaque tokens, `memory:read` / `memory:write` scopes.
+  opaque tokens, `memory:read` / `memory:write` scopes. The authorization
+  server (worldku.com) supports Client ID Metadata Documents and PKCE `S256`.
+- Discovery (SEP-2127 experimental): Server Card at
+  [`/mcp/server-card`](https://mcp.worldku.com/mcp/server-card), AI Catalog at
+  [`/.well-known/ai-catalog.json`](https://mcp.worldku.com/.well-known/ai-catalog.json).
 
 ## Limits
 
 - 200 reads and 50 saves per user per day (anti-abuse caps, reset at 00:00 UTC).
 - 10 MB per request.
-- Reads and saves each book one usage action on your Worldku account. The
-  amount is currently 0.
+- Reads and saves each book one usage action on your Worldku account. MCP
+  access is included with every Worldku plan, including Free.
 
 ## Development
 
@@ -108,8 +140,8 @@ pnpm type-check
 pnpm lint
 ```
 
-Deployment (Cloudflare Workers) requires Worldku secrets and is done from CI —
-see `wrangler.toml` for the binding surface (no secrets live in this repo).
+Deployment (Cloudflare Workers) is done by the Worldku team — see
+`wrangler.toml` for the binding surface (no secrets live in this repo).
 
 ## License
 
