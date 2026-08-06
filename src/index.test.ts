@@ -66,6 +66,26 @@ describe('transport binding', () => {
     expect(res.status).toBe(413);
   });
 
+  it('the payload cap counts bytes, not UTF-16 units, when Content-Length is absent', async () => {
+    // 30 three-byte characters: 30 code units but 90 bytes. A streamed body
+    // carries no Content-Length, so only the post-read measurement can catch it.
+    const req = new Request('https://mcp.worldku.com/mcp', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_KEY}` },
+      body: new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('一'.repeat(30)));
+          c.close();
+        },
+      }),
+      // undici requires an explicit duplex mode for stream bodies
+      duplex: 'half',
+    } as RequestInit);
+    expect(req.headers.get('content-length')).toBeNull();
+    const res = await worker.fetch(req, makeEnv({ PAYLOAD_MAX_BYTES: '30' }), makeCtx());
+    expect(res.status).toBe(413);
+  });
+
   it('unknown RPC method → 404 with -32601', async () => {
     const res = await run(mcpRequest({ method: 'subscriptions/listen' }));
     expect(res.status).toBe(404);
@@ -365,6 +385,25 @@ describe('tool argument strictness', () => {
     expect(result['isError']).toBe(true);
     expect(JSON.stringify(result['content'])).toContain("Unknown field 'thinking'");
   });
+
+  // Every one of these is a caller-side typo caught by pure validation, so none
+  // of them may reach the usage counter or the booking.
+  const freeRejections: Array<[string, string, Record<string, unknown>]> = [
+    ['messages that is not an array', 'memory_save', { messages: 'oops' }],
+    ['an empty messages array', 'memory_save', { messages: [] }],
+    ['an unsupported message role', 'memory_save', { messages: [{ role: 'system', content: 'x' }] }],
+    ['a malformed cursor', 'memory_recall', { cursor: '!!!not-a-cursor' }],
+    ['an unparseable date', 'memory_recall', { from: 'last tuesday' }],
+  ];
+  for (const [label, toolName, args] of freeRejections) {
+    it(`${toolName} rejects ${label} before the gate — nothing counted, nothing booked`, async () => {
+      const res = await run(mcpRequest({ toolName, args }));
+      const result = (await bodyOf(res))['result'] as Record<string, unknown>;
+      expect(result['isError']).toBe(true);
+      expect(db.calls.some((c) => c.path.includes('memory_mcp_bump_usage'))).toBe(false);
+      expect(db.calls.some((c) => c.path.includes('spend_credits_by_amount'))).toBe(false);
+    });
+  }
 });
 
 describe('usage gate + charged-0 booking', () => {
@@ -588,11 +627,40 @@ describe('tasks/get lifecycle', () => {
     expect(res.status).toBe(400);
   });
 
-  it('tasks/update and tasks/cancel acknowledge with empty results', async () => {
+  it('tasks/update and tasks/cancel acknowledge an owned task with empty results', async () => {
+    seedTask('processing');
     for (const method of ['tasks/update', 'tasks/cancel']) {
       const res = await run(mcpRequest({ method, params: { taskId: 'wkt_abc', inputResponses: {} } }));
       const result = (await bodyOf(res))['result'] as Record<string, unknown>;
       expect(result['resultType']).toBe('complete');
     }
+  });
+
+  it('tasks/update and tasks/cancel refuse an unknown taskId instead of acknowledging it', async () => {
+    for (const method of ['tasks/update', 'tasks/cancel']) {
+      const res = await run(mcpRequest({ method, params: { taskId: 'wkt_nope' } }));
+      expect(res.status).toBe(400);
+      expect(rpcError(await bodyOf(res)).code).toBe(-32602);
+    }
+  });
+
+  it("tasks/update and tasks/cancel cannot touch another user's task", async () => {
+    db.taskRows.push({
+      task_id: 'wkt_other',
+      user_id: '22222222-2222-2222-2222-222222222222',
+      batch_id: 'b-9',
+      created_at: '2026-07-29T10:00:00+00:00',
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    for (const method of ['tasks/update', 'tasks/cancel']) {
+      const res = await run(mcpRequest({ method, params: { taskId: 'wkt_other' } }));
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it('tasks/update and tasks/cancel require a taskId', async () => {
+    const res = await run(mcpRequest({ method: 'tasks/cancel', params: {} }));
+    expect(res.status).toBe(400);
+    expect(rpcError(await bodyOf(res)).message).toContain('taskId required');
   });
 });

@@ -91,11 +91,21 @@ export interface RecallArgs {
   limit?: number;
 }
 
-export async function runRecall(
-  env: Env,
-  userId: string,
+/** A recall query that has already passed argument validation. */
+export interface RecallQuery {
+  before: { b: string; i: string | null } | null;
+  from: string | null;
+  to: string | null;
+  memoryType: string | null;
+  sourceKey: string | null;
+  limit: number;
+}
+
+/** Pure — no I/O. Kept separate from runRecall so the caller can validate before
+ *  the usage gate: a malformed cursor or date must not cost the user a read. */
+export function parseRecallArgs(
   args: RecallArgs,
-): Promise<{ rows: MemoryRow[]; nextCursor: string | null } | { badCursor: true } | { badDate: string }> {
+): RecallQuery | { badCursor: true } | { badDate: string } {
   for (const field of ['from', 'to'] as const) {
     const v = args[field];
     if (v !== undefined && Number.isNaN(Date.parse(v))) return { badDate: field };
@@ -105,18 +115,32 @@ export async function runRecall(
     before = decodeCursor(args.cursor);
     if (!before) return { badCursor: true };
   }
-  const limit = args.limit ?? 20;
+  return {
+    before,
+    from: args.from ?? null,
+    to: args.to ?? null,
+    memoryType: args.memory_type ?? null,
+    sourceKey: args.source ?? null,
+    limit: args.limit ?? 20,
+  };
+}
+
+export async function runRecall(
+  env: Env,
+  userId: string,
+  q: RecallQuery,
+): Promise<{ rows: MemoryRow[]; nextCursor: string | null }> {
   const rows = await callRpc<MemoryRow[]>(env, 'memory_mcp_list', {
     p_user_id: userId,
-    p_limit: limit,
-    p_before: before?.b ?? null,
-    p_before_id: before?.i ?? null,
-    p_from: args.from ?? null,
-    p_to: args.to ?? null,
-    p_memory_type: args.memory_type ?? null,
-    p_source_key: args.source ?? null,
+    p_limit: q.limit,
+    p_before: q.before?.b ?? null,
+    p_before_id: q.before?.i ?? null,
+    p_from: q.from,
+    p_to: q.to,
+    p_memory_type: q.memoryType,
+    p_source_key: q.sourceKey,
   });
   const last = rows[rows.length - 1];
-  const nextCursor = rows.length === limit && last ? encodeCursor(last) : null;
+  const nextCursor = rows.length === q.limit && last ? encodeCursor(last) : null;
   return { rows, nextCursor };
 }
