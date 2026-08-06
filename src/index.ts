@@ -34,11 +34,14 @@ import { authenticate, isAuthFailure, wwwAuthenticate, type AuthContext } from '
 import { bumpUsage, bookUsageAction, type UsageGate, type UsageKind } from './billing';
 import { TOOLS, validateArgs, validateMessages } from './tools/defs';
 import {
+  parseRecallArgs,
   renderReadResult,
   runOverview,
   runRecall,
   runSearch,
   type MemoryRow,
+  type RecallArgs,
+  type RecallQuery,
 } from './tools/read';
 import {
   mintTask,
@@ -115,6 +118,24 @@ async function execTool(
   const argError = validateArgs(def, args);
   if (argError) return toolError(argError.message);
 
+  // The per-tool argument parsing below is pure, and it runs BEFORE the usage
+  // gate: a malformed cursor, date or transcript is the caller's typo, and a
+  // typo must never cost the user a read or a save.
+  let recall: RecallQuery | undefined;
+  let messages: { role: string; content: string }[] | undefined;
+  if (def.name === 'memory_recall') {
+    const parsed = parseRecallArgs(args as RecallArgs);
+    if ('badCursor' in parsed) {
+      return toolError('Invalid cursor — pass the cursor exactly as returned by a previous memory_recall result.');
+    }
+    if ('badDate' in parsed) return toolError(`Argument '${parsed.badDate}' is not a valid ISO date.`);
+    recall = parsed;
+  } else if (def.name === 'memory_save') {
+    const parsed = validateMessages(args['messages']);
+    if (!Array.isArray(parsed)) return toolError(parsed.message);
+    messages = parsed;
+  }
+
   const kind: UsageKind = def.name === 'memory_save' ? 'write' : 'read';
   const scopeNeeded = kind === 'write' ? 'memory:write' : 'memory:read';
   if (!auth.scopes.has(scopeNeeded)) {
@@ -142,10 +163,8 @@ async function execTool(
     };
   }
 
-  if (def.name === 'memory_recall') {
-    const out = await runRecall(env, auth.userId, args as Parameters<typeof runRecall>[2]);
-    if ('badCursor' in out) return toolError('Invalid cursor — pass the cursor exactly as returned by a previous memory_recall result.');
-    if ('badDate' in out) return toolError(`Argument '${out.badDate}' is not a valid ISO date.`);
+  if (recall) {
+    const out = await runRecall(env, auth.userId, recall);
     const extra = out.nextCursor ? `More results available. Next cursor: ${out.nextCursor}` : undefined;
     return {
       text: renderReadResult(out.rows, gate, extra),
@@ -153,27 +172,30 @@ async function execTool(
     };
   }
 
-  // memory_save
-  const messages = validateMessages(args['messages']);
-  if (!Array.isArray(messages)) return toolError(messages.message);
-  const title = args['title'] as string | undefined;
-  const source = sourceIdentityOf(call.clientName);
-  let receipt;
-  try {
-    receipt = await runSave(env, auth.userId, source, title, messages);
-  } catch (err) {
-    if (err instanceof SourceBusyError) {
-      return toolError('The previous save from this tool is still being processed. Wait a minute and try again.');
+  if (messages) {
+    const title = args['title'] as string | undefined;
+    const source = sourceIdentityOf(call.clientName);
+    let receipt;
+    try {
+      receipt = await runSave(env, auth.userId, source, title, messages);
+    } catch (err) {
+      if (err instanceof SourceBusyError) {
+        return toolError('The previous save from this tool is still being processed. Wait a minute and try again.');
+      }
+      throw err;
     }
-    throw err;
+    const usedLine = `Saves used today: ${gate.used}/${gate.cap}.`;
+    const text = receiptText(receipt, messages, usedLine);
+    if (receipt.batch_id && call.tasksDeclared) {
+      const { taskId, ttlMs } = await mintTask(env, auth.userId, receipt.batch_id);
+      return { text, task: { taskId, ttlMs, statusMessage: text } };
+    }
+    return { text, structured: { decision: receipt.decision, received: receipt.received, newCount: receipt.new_count } };
   }
-  const usedLine = `Saves used today: ${gate.used}/${gate.cap}.`;
-  const text = receiptText(receipt, messages, usedLine);
-  if (receipt.batch_id && call.tasksDeclared) {
-    const { taskId, ttlMs } = await mintTask(env, auth.userId, receipt.batch_id);
-    return { text, task: { taskId, ttlMs, statusMessage: text } };
-  }
-  return { text, structured: { decision: receipt.decision, received: receipt.received, newCount: receipt.new_count } };
+
+  // Exhaustiveness guard: TOOLS is fixed and every entry is handled above. A new
+  // tool added without a branch must fail loudly here rather than book silently.
+  throw new Error(`unhandled tool: ${def.name}`);
 }
 
 /** Shared tools/call response builder (both protocol eras; the task shape can
@@ -301,14 +323,22 @@ async function dispatch(
       }, cors);
     }
 
+    // Neither method changes server state — tasks/update has no input_required
+    // flow to answer, and cancellation is cooperative (enqueued extraction is not
+    // interrupted, as the memory_save description says). They still resolve the
+    // task first: acknowledging an id that does not exist, or belongs to someone
+    // else, would confirm it to anyone holding a credential.
     case 'tasks/update':
-      // No input_required flows exist in this server — acknowledge with an empty result.
+    case 'tasks/cancel': {
+      const taskId = req.params['taskId'];
+      if (typeof taskId !== 'string') {
+        return errorResponse(req.id, 400, INVALID_PARAMS, 'taskId required', undefined, cors);
+      }
+      if (!(await getTask(env, auth.userId, taskId))) {
+        return errorResponse(req.id, 400, INVALID_PARAMS, 'Unknown or expired taskId', undefined, cors);
+      }
       return resultResponse(req.id, { resultType: 'complete', _meta: SERVER_INFO_META }, cors);
-
-    case 'tasks/cancel':
-      // Cooperative: acknowledged, but enqueued extraction is not interrupted
-      // (documented in the memory_save tool description).
-      return resultResponse(req.id, { resultType: 'complete', _meta: SERVER_INFO_META }, cors);
+    }
 
     default:
       return errorResponse(req.id, 404, METHOD_NOT_FOUND, `Method not found: ${req.method}`, undefined, cors);
@@ -381,15 +411,19 @@ const worker = {
       return new Response(null, { status: 405, headers: { Allow: 'POST', ...cors } });
     }
 
+    // Content-Length is advisory — absent on chunked bodies, and NaN if garbage,
+    // in which case both comparisons below are false and we fall through to the
+    // authoritative check. That one measures BYTES: a string length would count
+    // UTF-16 code units and let a multi-byte payload past a byte cap.
     const maxBytes = intVar(env.PAYLOAD_MAX_BYTES, 10_485_760);
-    const declaredLen = Number(request.headers.get('content-length') ?? '');
-    if (Number.isFinite(declaredLen) && declaredLen > maxBytes) {
+    if (Number(request.headers.get('content-length')) > maxBytes) {
       return errorResponse(null, 413, INVALID_PARAMS, 'Payload too large', undefined, cors);
     }
-    const raw = await request.text();
-    if (raw.length > maxBytes) {
+    const buf = await request.arrayBuffer();
+    if (buf.byteLength > maxBytes) {
       return errorResponse(null, 413, INVALID_PARAMS, 'Payload too large', undefined, cors);
     }
+    const raw = new TextDecoder().decode(buf);
 
     let body: JsonRpcMessage;
     try {
