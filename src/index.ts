@@ -33,12 +33,15 @@ import { dispatchLegacy } from './legacy';
 import { authenticate, isAuthFailure, wwwAuthenticate, type AuthContext } from './auth';
 import { bumpUsage, bookUsageAction, type UsageGate, type UsageKind } from './billing';
 import { TOOLS, validateArgs, validateMessages } from './tools/defs';
+import { ConsentOffError } from './db';
 import {
+  logRecall,
   parseRecallArgs,
   renderReadResult,
   runOverview,
   runRecall,
   runSearch,
+  UNTRUSTED_NOTICE,
   type MemoryRow,
   type RecallArgs,
   type RecallQuery,
@@ -96,9 +99,18 @@ function overCapText(kind: UsageKind, gate: UsageGate): string {
     + 'This cap exists to catch runaway automation — if you hit it in normal use, please tell us.';
 }
 
+// The memory consent switch is off (ERRCODE 55007, raised by the usage counter
+// before anything is booked, and by the work RPCs as defense in depth). A normal
+// tool result, not an error: the client AI is meant to read this and relay it.
+// Bare URL on purpose — the next-intl middleware 307s to the user's locale.
+const CONSENT_OFF_TEXT =
+  'Memory is turned off for this Worldku account, so nothing can be read or saved right now.\n'
+  + 'The user can turn it back on at https://worldku.com/settings (Memory switch).';
+
 interface ToolCallContext {
   clientName: string | undefined;
   tasksDeclared: boolean;
+  waitUntil: (p: Promise<unknown>) => void;
 }
 
 async function execTool(
@@ -147,34 +159,38 @@ async function execTool(
   if (!gate.allowed) return toolError(overCapText(kind, gate));
   await bookUsageAction(env, auth.userId, kind);
 
+  const source = sourceIdentityOf(call.clientName);
+
   if (def.name === 'memory_overview') {
     const rows = await runOverview(env, auth.userId);
+    logRecall(env, auth.userId, source.key, rows, call.waitUntil);
     return {
       text: renderReadResult(rows, gate),
-      structured: { memories: rows.map(stripId) },
+      structured: { notice: UNTRUSTED_NOTICE, memories: rows.map(stripId) },
     };
   }
 
   if (def.name === 'memory_search') {
     const rows = await runSearch(env, auth.userId, args['query'] as string, args['limit'] as number | undefined);
+    logRecall(env, auth.userId, source.key, rows, call.waitUntil);
     return {
       text: renderReadResult(rows, gate),
-      structured: { memories: rows.map(stripId) },
+      structured: { notice: UNTRUSTED_NOTICE, memories: rows.map(stripId) },
     };
   }
 
   if (recall) {
     const out = await runRecall(env, auth.userId, recall);
+    logRecall(env, auth.userId, source.key, out.rows, call.waitUntil);
     const extra = out.nextCursor ? `More results available. Next cursor: ${out.nextCursor}` : undefined;
     return {
       text: renderReadResult(out.rows, gate, extra),
-      structured: { memories: out.rows.map(stripId), nextCursor: out.nextCursor },
+      structured: { notice: UNTRUSTED_NOTICE, memories: out.rows.map(stripId), nextCursor: out.nextCursor },
     };
   }
 
   if (messages) {
     const title = args['title'] as string | undefined;
-    const source = sourceIdentityOf(call.clientName);
     let receipt;
     try {
       receipt = await runSave(env, auth.userId, source, title, messages);
@@ -212,11 +228,18 @@ async function runToolCall(
   try {
     outcome = await execTool(env, params, auth, call);
   } catch (err) {
-    // Business/backend failure → tool execution error (models can retry);
-    // internal details never leave this worker.
-    console.error('[worldku-mcp] tool failure', params['name'],
-      err instanceof Error ? err.message : String(err));
-    outcome = toolError('The Worldku memory service is temporarily unavailable. Please try again shortly.');
+    if (err instanceof ConsentOffError) {
+      // Consent switch off (55007) — a normal outcome for the client AI to relay,
+      // NOT an error, and caught before the generic catch below would mislabel
+      // it as an outage. Both the usage counter and the work RPCs land here.
+      outcome = { text: CONSENT_OFF_TEXT };
+    } else {
+      // Business/backend failure → tool execution error (models can retry);
+      // internal details never leave this worker.
+      console.error('[worldku-mcp] tool failure', params['name'],
+        err instanceof Error ? err.message : String(err));
+      outcome = toolError('The Worldku memory service is temporarily unavailable. Please try again shortly.');
+    }
   }
   if ('protocol' in outcome) {
     if (outcome.protocol === 'unknown_tool') {
@@ -261,6 +284,9 @@ function stripId(row: MemoryRow): Record<string, unknown> {
     importance: row.importance,
     occurredAt: row.occurred_at,
     recordedAt: row.created_at,
+    // Per-object trust marker: structuredContent has no text frame, so every
+    // memory carries the boundary itself (the container carries the prose).
+    untrusted: true,
   };
 }
 
@@ -269,6 +295,7 @@ async function dispatch(
   req: ValidatedRequest,
   auth: AuthContext,
   cors: Record<string, string>,
+  waitUntil: (p: Promise<unknown>) => void,
 ): Promise<Response> {
   switch (req.method) {
     case 'server/discover':
@@ -297,6 +324,7 @@ async function dispatch(
       return runToolCall(env, req.id, req.params, auth, {
         clientName: clientName(req.meta),
         tasksDeclared: clientDeclaredTasks(req.meta),
+        waitUntil,
       }, cors);
 
     case 'tasks/get': {
@@ -366,6 +394,14 @@ function prmResponse(env: Env): Response {
 
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // EXTRACTOR_VERSION feeds segment-job idempotency keys shared with the import
+    // worker; a silent fallback already forked those keys once (mem-3type@1 vs @2).
+    // Workers have no boot phase, so "refuse to start" lives at the request entry.
+    if (!env.EXTRACTOR_VERSION) {
+      console.error('[worldku-mcp] EXTRACTOR_VERSION is not set — refusing to serve');
+      return errorResponse(null, 500, INTERNAL_ERROR,
+        'Server misconfigured: the EXTRACTOR_VERSION environment variable is not set.');
+    }
     const url = new URL(request.url);
     const origin = request.headers.get('Origin');
     const cors = corsHeaders(env, origin);
@@ -468,7 +504,8 @@ const worker = {
       const legacyReq = { id: body.id as JsonRpcId, method: body.method, params };
       try {
         return await dispatchLegacy(env, request, legacyReq, auth, (id, p, a, name) =>
-          runToolCall(env, id, p, a, { clientName: name, tasksDeclared: false }, cors), cors);
+          runToolCall(env, id, p, a,
+            { clientName: name, tasksDeclared: false, waitUntil: (p2) => ctx.waitUntil(p2) }, cors), cors);
       } catch (err) {
         console.error('[worldku-mcp] internal error (legacy)', body.method,
           err instanceof Error ? err.message : String(err));
@@ -483,7 +520,7 @@ const worker = {
     }
 
     try {
-      return await dispatch(env, validated, auth, cors);
+      return await dispatch(env, validated, auth, cors, (p) => ctx.waitUntil(p));
     } catch (err) {
       // Sanitized: internal error details (provider bodies, stacks) never leave.
       console.error('[worldku-mcp] internal error', validated.method,

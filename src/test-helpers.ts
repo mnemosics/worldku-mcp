@@ -16,6 +16,10 @@ export interface FakeDb {
   taskRows: Array<{ task_id: string; user_id: string; batch_id: string; created_at: string; expires_at: string }>;
   batchRows: Array<{ id: string; status: string; stats: Record<string, unknown> | null; error: string | null; created_at: string; finished_at: string | null }>;
   bumpResult: { allowed: boolean; used: number; resets_at: string };
+  /** 55007 memory_consent_off from the usage counter / the work RPCs. */
+  bumpConsentOff: boolean;
+  listConsentOff: boolean;
+  recallLogFail: boolean;
   saveReceipt: Record<string, unknown>;
   listRows: unknown[];
   searchRows: unknown[];
@@ -30,6 +34,9 @@ export function makeFakeDb(): FakeDb {
     taskRows: [],
     batchRows: [],
     bumpResult: { allowed: true, used: 1, resets_at: '2026-07-30T00:00:00+00:00' },
+    bumpConsentOff: false,
+    listConsentOff: false,
+    recallLogFail: false,
     saveReceipt: { decision: 'new', received: 2, new_count: 2, total_messages: 2, batch_id: 'b-1' },
     listRows: [],
     searchRows: [],
@@ -59,15 +66,25 @@ export function installFetchMock(db: FakeDb): () => void {
     const path = new URL(url).pathname + new URL(url).search;
     db.calls.push({ kind: method, path, body });
 
-    if (path.startsWith('/rest/v1/rpc/memory_mcp_bump_usage')) return json(db.bumpResult);
+    if (path.startsWith('/rest/v1/rpc/memory_mcp_bump_usage')) {
+      if (db.bumpConsentOff) return json({ code: '55007', message: 'memory_consent_off' }, 400);
+      return json(db.bumpResult);
+    }
     if (path.startsWith('/rest/v1/rpc/spend_credits_by_amount')) return json({ txn_id: 't', cost: 0 });
+    if (path.startsWith('/rest/v1/rpc/memory_log_recall')) {
+      if (db.recallLogFail) return json({ message: 'recall log unavailable' }, 500);
+      return json(null);
+    }
     if (path.startsWith('/rest/v1/rpc/memory_mcp_save_conversation')) {
       if (db.saveReceipt['__error'] === 'busy') {
         return json({ code: '55006', message: 'mcp_source_busy' }, 400);
       }
       return json(db.saveReceipt);
     }
-    if (path.startsWith('/rest/v1/rpc/memory_mcp_list')) return json(db.listRows);
+    if (path.startsWith('/rest/v1/rpc/memory_mcp_list')) {
+      if (db.listConsentOff) return json({ code: '55007', message: 'memory_consent_off' }, 400);
+      return json(db.listRows);
+    }
     if (path.startsWith('/rest/v1/rpc/memory_mcp_search')) return json(db.searchRows);
     if (path.startsWith('/rest/v1/mcp_access_keys')) {
       if (method === 'PATCH') return new Response(null, { status: 204 });
@@ -115,6 +132,7 @@ export function makeEnv(overrides: Partial<Env> = {}): Env {
     RESOURCE_URI: 'https://mcp.worldku.com/mcp',
     AUTH_SERVER_URL: 'https://www.worldku.com',
     ALLOWED_ORIGINS: 'https://claude.ai',
+    EXTRACTOR_VERSION: 'mem-3type@2',
     ...overrides,
   };
 }

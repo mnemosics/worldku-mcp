@@ -42,8 +42,10 @@ PAYLOAD_MAX_BYTES = "10485760"
 OVERVIEW_N = "20"
 # Task handle TTL (extraction completes in minutes; 24h is generous).
 TASK_TTL_MS = "86400000"
-# Must match the import worker's EXTRACTOR_VERSION (segment-job idempotency keys).
-EXTRACTOR_VERSION = "mem-3type@1"
+# Must match the DB's memory_current_extractor_version() and the import worker's
+# EXTRACTOR_VERSION (segment-job idempotency keys cross-path dedup). No fallback:
+# a missing value fails fast at the request entry instead of forking the keys.
+EXTRACTOR_VERSION = "mem-3type@2"
 
 # secrets (set via `wrangler secret put`, NOT in this file):
 #   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, MCP_APP_KEY

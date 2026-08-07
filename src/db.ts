@@ -16,6 +16,11 @@ export class DbError extends Error {
   }
 }
 
+/** ERRCODE 55007 = the conversation-memory consent gate. memory_mcp_bump_usage
+ *  and the three work RPCs all raise it when profiles.conversation_memory_consent
+ *  is false or the row is missing — every RPC path converges here. */
+export class ConsentOffError extends Error {}
+
 async function dbFetch(env: Env, path: string, init: RequestInit): Promise<Response> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), DB_TIMEOUT_MS);
@@ -47,6 +52,7 @@ async function raiseOnError(res: Response): Promise<void> {
   } catch {
     /* non-JSON error body */
   }
+  if (code === '55007' || body.includes('memory_consent_off')) throw new ConsentOffError();
   throw new DbError(res.status, code, body.slice(0, 300));
 }
 

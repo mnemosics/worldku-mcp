@@ -56,7 +56,9 @@ export async function runSave(
       p_source_name: source.display,
       p_title: title ?? null,
       p_messages: withHashes,
-      p_extractor_version: env.EXTRACTOR_VERSION ?? 'mem-3type@1',
+      // No fallback: a stale hardcoded version forks segment-job idempotency keys
+      // against the import worker. Missing env fails fast at the request entry.
+      p_extractor_version: env.EXTRACTOR_VERSION,
     });
   } catch (err) {
     // ERRCODE 55006 = the one-active-batch gate (previous save still extracting).
