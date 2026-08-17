@@ -98,6 +98,8 @@ export async function runSearch(env: Env, userId: string, query: string, limit?:
     p_user_id: userId,
     p_query_vec: vectorLiteral(vec),
     p_limit: limit ?? 8,
+    // Query 原文：memory 轨第三人指名门的匹配输入（查询里指名的第三人才召回其记忆）。
+    p_query_text: query,
   });
 }
 
