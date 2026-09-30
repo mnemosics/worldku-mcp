@@ -17,7 +17,6 @@ export interface Env {
   PAYLOAD_MAX_BYTES?: string;
   OVERVIEW_N?: string;
   TASK_TTL_MS?: string;
-  EXTRACTOR_VERSION?: string;
 }
 
 export const SERVER_NAME = 'worldku-mcp';

@@ -394,14 +394,6 @@ function prmResponse(env: Env): Response {
 
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // EXTRACTOR_VERSION feeds segment-job idempotency keys shared with the import
-    // worker; a silent fallback already forked those keys once (mem-3type@1 vs @2).
-    // Workers have no boot phase, so "refuse to start" lives at the request entry.
-    if (!env.EXTRACTOR_VERSION) {
-      console.error('[worldku-mcp] EXTRACTOR_VERSION is not set — refusing to serve');
-      return errorResponse(null, 500, INTERNAL_ERROR,
-        'Server misconfigured: the EXTRACTOR_VERSION environment variable is not set.');
-    }
     const url = new URL(request.url);
     const origin = request.headers.get('Origin');
     const cors = corsHeaders(env, origin);

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import worker from './index';
 import {
   bodyOf,
@@ -541,25 +541,42 @@ describe('consent gate (ERRCODE 55007 → memory_consent_off)', () => {
   });
 });
 
-describe('EXTRACTOR_VERSION fail-fast', () => {
-  it('missing EXTRACTOR_VERSION → explicit 500 naming the variable, not the generic unavailable text', async () => {
-    const misconfigured = makeEnv();
-    delete misconfigured.EXTRACTOR_VERSION;
-    const res = await worker.fetch(mcpRequest({ toolName: 'memory_overview' }), misconfigured, makeCtx());
-    expect(res.status).toBe(500);
-    const err = rpcError(await bodyOf(res));
-    expect(err.message).toContain('EXTRACTOR_VERSION');
-    expect(err.message).not.toContain('temporarily unavailable');
-    expect(db.calls.length).toBe(0); // fail-fast at the entry: nothing was attempted
+describe('extractor version (owned by the DB, read on every save)', () => {
+  const args = { messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hey' }] };
+  const saveCall = () => db.calls.find((c) => c.path.includes('memory_mcp_save_conversation'));
+
+  it('memory_save forwards exactly what memory_current_extractor_version() returns', async () => {
+    db.extractorVersion = 'mem-3type@from-db';
+    const res = await run(mcpRequest({ toolName: 'memory_save', args }));
+    expect(((await bodyOf(res))['result'] as Record<string, unknown>)['isError']).toBe(false);
+    expect((saveCall()!.body as Record<string, unknown>)['p_extractor_version']).toBe('mem-3type@from-db');
   });
 
-  it('memory_save passes the env version straight through — no hardcoded fallback', async () => {
-    await run(mcpRequest({
-      toolName: 'memory_save',
-      args: { messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hey' }] },
-    }));
-    const save = db.calls.find((c) => c.path.includes('memory_mcp_save_conversation'))!.body as Record<string, unknown>;
-    expect(save['p_extractor_version']).toBe('mem-3type@2');
+  const badReads: Array<[string, (d: FakeDb) => void]> = [
+    ['the version read fails', (d) => { d.extractorVersionFail = true; }],
+    ['the DB returns null', (d) => { d.extractorVersion = null; }],
+    ['the DB returns an empty string', (d) => { d.extractorVersion = ''; }],
+  ];
+  for (const [label, arrange] of badReads) {
+    it(`${label} → the save fails loudly before anything is archived`, async () => {
+      arrange(db);
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const res = await run(mcpRequest({ toolName: 'memory_save', args }));
+        const result = (await bodyOf(res))['result'] as Record<string, unknown>;
+        expect(result['isError']).toBe(true);
+        expect(JSON.stringify(result['content'])).toContain('temporarily unavailable');
+        expect(saveCall()).toBeUndefined();
+        expect(logged).toHaveBeenCalled();
+      } finally {
+        logged.mockRestore();
+      }
+    });
+  }
+
+  it('reads never consult the extractor version', async () => {
+    await run(mcpRequest({ toolName: 'memory_overview' }));
+    expect(db.calls.some((c) => c.path.includes('memory_current_extractor_version'))).toBe(false);
   });
 });
 

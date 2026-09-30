@@ -20,6 +20,10 @@ export interface FakeDb {
   bumpConsentOff: boolean;
   listConsentOff: boolean;
   recallLogFail: boolean;
+  /** What the DB's memory_current_extractor_version() returns — deliberately not
+   *  a real platform label: the worker must forward whatever the DB says. */
+  extractorVersion: unknown;
+  extractorVersionFail: boolean;
   saveReceipt: Record<string, unknown>;
   listRows: unknown[];
   searchRows: unknown[];
@@ -37,6 +41,8 @@ export function makeFakeDb(): FakeDb {
     bumpConsentOff: false,
     listConsentOff: false,
     recallLogFail: false,
+    extractorVersion: 'mem-3type@db-fixture',
+    extractorVersionFail: false,
     saveReceipt: { decision: 'new', received: 2, new_count: 2, total_messages: 2, batch_id: 'b-1' },
     listRows: [],
     searchRows: [],
@@ -74,6 +80,10 @@ export function installFetchMock(db: FakeDb): () => void {
     if (path.startsWith('/rest/v1/rpc/memory_log_recall')) {
       if (db.recallLogFail) return json({ message: 'recall log unavailable' }, 500);
       return json(null);
+    }
+    if (path.startsWith('/rest/v1/rpc/memory_current_extractor_version')) {
+      if (db.extractorVersionFail) return json({ message: 'db unavailable' }, 503);
+      return json(db.extractorVersion);
     }
     if (path.startsWith('/rest/v1/rpc/memory_mcp_save_conversation')) {
       if (db.saveReceipt['__error'] === 'busy') {
@@ -132,7 +142,6 @@ export function makeEnv(overrides: Partial<Env> = {}): Env {
     RESOURCE_URI: 'https://mcp.worldku.com/mcp',
     AUTH_SERVER_URL: 'https://www.worldku.com',
     ALLOWED_ORIGINS: 'https://claude.ai',
-    EXTRACTOR_VERSION: 'mem-3type@2',
     ...overrides,
   };
 }

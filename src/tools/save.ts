@@ -35,6 +35,17 @@ export function sourceIdentityOf(clientName: string | undefined): SourceIdentity
 
 export class SourceBusyError extends Error {}
 
+/** The extraction pipeline version the save RPC folds into each seeded segment
+ *  job's idempotency key. The platform owns it — memory_current_extractor_version(),
+ *  defined by its latest migration — and this worker keeps no copy: it is read on
+ *  every save, so a platform extractor bump needs no change here. A missing or
+ *  non-string value fails the save (a NULL would silently void the key). */
+async function currentExtractorVersion(env: Env): Promise<string> {
+  const version = await callRpc<unknown>(env, 'memory_current_extractor_version', {});
+  if (typeof version !== 'string' || version === '') throw new Error('extractor_version_invalid');
+  return version;
+}
+
 export async function runSave(
   env: Env,
   userId: string,
@@ -42,13 +53,16 @@ export async function runSave(
   title: string | undefined,
   messages: { role: string; content: string }[],
 ): Promise<SaveReceipt> {
-  const withHashes = await Promise.all(
-    messages.map(async (m) => ({
-      role: m.role,
-      content: m.content,
-      content_hash: await messageContentHash(m.role, m.content),
-    })),
-  );
+  const [extractorVersion, withHashes] = await Promise.all([
+    currentExtractorVersion(env),
+    Promise.all(
+      messages.map(async (m) => ({
+        role: m.role,
+        content: m.content,
+        content_hash: await messageContentHash(m.role, m.content),
+      })),
+    ),
+  ]);
   try {
     return await callRpc<SaveReceipt>(env, 'memory_mcp_save_conversation', {
       p_user_id: userId,
@@ -56,9 +70,7 @@ export async function runSave(
       p_source_name: source.display,
       p_title: title ?? null,
       p_messages: withHashes,
-      // No fallback: a stale hardcoded version forks segment-job idempotency keys
-      // against the import worker. Missing env fails fast at the request entry.
-      p_extractor_version: env.EXTRACTOR_VERSION,
+      p_extractor_version: extractorVersion,
     });
   } catch (err) {
     // ERRCODE 55006 = the one-active-batch gate (previous save still extracting).
