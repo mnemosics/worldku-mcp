@@ -9,7 +9,8 @@ import { embedQuery, vectorLiteral } from '../embed';
 import type { UsageGate } from '../billing';
 
 export interface MemoryRow {
-  id?: string;
+  /** memories.id: both read RPCs return it. Logged for recall attribution, never shown to the client. */
+  id: string;
   content: string;
   memory_type: string;
   source_key: string | null;
@@ -69,8 +70,8 @@ export function renderReadResult(rows: MemoryRow[], gate: UsageGate, extra?: str
   return lines.join('\n');
 }
 
-export function encodeCursor(row: { created_at: string; id?: string }): string {
-  return btoa(JSON.stringify({ b: row.created_at, i: row.id ?? null }))
+export function encodeCursor(row: { created_at: string; id: string }): string {
+  return btoa(JSON.stringify({ b: row.created_at, i: row.id }))
     .replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 }
 
@@ -149,7 +150,8 @@ export function parseRecallArgs(
 /** Recall observability (fire-and-forget): one memory_log_recall RPC per read
  *  that returned rows, carried by waitUntil — never awaited on the response
  *  path, and failure is completely silent (logging must never affect the tool
- *  result). Rows without an internal id cannot be logged and are skipped. */
+ *  result). Every row carries its memory id (memory_mcp_list and
+ *  memory_mcp_search both return it), so every row is logged. */
 export function logRecall(
   env: Env,
   userId: string,
@@ -157,10 +159,8 @@ export function logRecall(
   rows: MemoryRow[],
   waitUntil: (p: Promise<unknown>) => void,
 ): void {
-  const hits = rows
-    .filter((r): r is MemoryRow & { id: string } => typeof r.id === 'string')
-    .map((r) => ({ node_kind: 'memory', node_id: r.id }));
-  if (hits.length === 0) return;
+  if (rows.length === 0) return;
+  const hits = rows.map((r) => ({ node_kind: 'memory', node_id: r.id }));
   waitUntil(callRpc(env, 'memory_log_recall', {
     p_user_id: userId,
     p_surface: 'mcp',

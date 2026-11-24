@@ -475,6 +475,7 @@ describe('reads', () => {
 
   it('memory_search embeds the query through the gateway and returns matches', async () => {
     db.searchRows = [{
+      id: 'm-9',
       content: 'Lives in Lisbon',
       memory_type: 'person_fact',
       source_key: 'codex',
@@ -674,6 +675,18 @@ describe('recall observability (memory_log_recall, fire-and-forget)', () => {
       { node_kind: 'memory', node_id: 'm-2' },
     ]);
     expect(ctx.waitUntil).toHaveBeenCalled();
+  });
+
+  it('a search logs its hits by memory id, like overview and recall', async () => {
+    db.searchRows = rows(2).map((r) => ({ ...r, distance: 0.1 }));
+    const ctx = makeCtx();
+    await worker.fetch(mcpRequest({ toolName: 'memory_search', args: { query: 'what did I do?' } }), env, ctx);
+    const logCalls = db.calls.filter((c) => c.path.includes('memory_log_recall'));
+    expect(logCalls).toHaveLength(1);
+    expect((logCalls[0]!.body as Record<string, unknown>)['p_hits']).toEqual([
+      { node_kind: 'memory', node_id: 'm-0' },
+      { node_kind: 'memory', node_id: 'm-1' },
+    ]);
   });
 
   it('zero rows → no log call', async () => {
